@@ -2,7 +2,8 @@
 //! nombre y el tamaño de su pantalla) y se hablan por TCP: una línea JSON de
 //! ida, una de vuelta.
 //!
-//!   {"pide":"presta","de":"senjougahara"}   ¿me prestas tu pantalla?
+//!   {"pide":"presta","de":"senjougahara","sonido":"aqui","bitrate":35000,"fps":60}
+//!                                           ¿me prestas tu pantalla?
 //!   {"pide":"suelta","de":"hachikuji"}      ya cerré Moonlight: apágalo
 //!   → {"ok":true} | {"ok":false,"por":"no|sin-pareja|ocupada|…"}
 
@@ -116,8 +117,15 @@ pub fn pedir(ips: &[IpAddr], puerto: u16, msg: &Value, espera: Duration) -> Resu
     Err(ultimo)
 }
 
-pub fn presta_msg() -> Value {
-    json!({ "pide": "presta", "de": yo() })
+/// Lo que la principal decide: el sonido y la calidad.
+pub fn presta_msg(a: &crate::ajustes::Ajustes) -> Value {
+    json!({
+        "pide": "presta",
+        "de": yo(),
+        "sonido": a.sonido.clave(),
+        "bitrate": a.bitrate,
+        "fps": a.fps,
+    })
 }
 
 pub fn suelta_msg() -> Value {

@@ -16,11 +16,12 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::ajustes::Sonido;
 use crate::lang::{es, l};
-use crate::{hypr, red};
+use crate::{estado, hypr, red};
 
-/// a quién le estoy prestando la pantalla ahorita
-static PRESTANDO: Mutex<Option<String>> = Mutex::new(None);
+/// a quién le estoy prestando la pantalla ahorita, y el pid de su Moonlight
+static PRESTANDO: Mutex<Option<(String, u32)>> = Mutex::new(None);
 
 fn confianza() -> PathBuf {
     crate::home().join(".config/machin/confianza")
@@ -90,7 +91,7 @@ fn preguntar(nombre: &str) -> &'static str {
     }
 }
 
-fn presta(nombre: &str, ip: IpAddr) -> Value {
+fn presta(msg: &Value, nombre: &str, ip: IpAddr) -> Value {
     if !emparejada(nombre) {
         crate::avisa(
             "machín",
@@ -102,43 +103,79 @@ fn presta(nombre: &str, ip: IpAddr) -> Value {
         );
         return red::no("sin-pareja");
     }
-    {
+    // la misma que ya está conectada vuelve a pedir: se reconecta con otro
+    // sonido o calidad; ya habías aceptado, no se pregunta otra vez
+    let reconexion = {
         let mut p = PRESTANDO.lock().unwrap();
-        if p.is_some() {
-            return red::no("ocupada");
+        match p.as_ref() {
+            Some((n, pid)) if n == nombre => {
+                let _ = Command::new("kill").arg(pid.to_string()).status();
+                true
+            }
+            Some(_) => return red::no("ocupada"),
+            None => {
+                *p = Some((nombre.to_string(), 0));
+                false
+            }
         }
-        *p = Some(nombre.to_string());
+    };
+    if !reconexion {
+        let respuesta = if de_confianza(nombre) { "si" } else { preguntar(nombre) };
+        if respuesta == "no" {
+            *PRESTANDO.lock().unwrap() = None;
+            return red::no("no");
+        }
+        if respuesta == "siempre" {
+            confiar(nombre);
+        }
+    } else {
+        // que el Moonlight viejo suelte la pantalla
+        thread::sleep(Duration::from_millis(800));
     }
-    let respuesta = if de_confianza(nombre) { "si" } else { preguntar(nombre) };
-    if respuesta == "no" {
-        *PRESTANDO.lock().unwrap() = None;
-        return red::no("no");
-    }
-    if respuesta == "siempre" {
-        confiar(nombre);
-    }
-    let mut hijo = match crate::moonlight(&ip.to_string()).spawn() {
+    let sonido = msg["sonido"].as_str().and_then(Sonido::de).unwrap_or(Sonido::Aqui);
+    let bitrate = msg["bitrate"].as_u64().map(|b| b.clamp(2000, 150_000) as u32).unwrap_or(35000);
+    let fps = msg["fps"].as_u64().map(|f| f.clamp(10, 240) as u32).unwrap_or(60);
+    // «allá»: que la principal se calle (el sonido sale aquí)
+    let mut hijo = match crate::moonlight(&ip.to_string(), sonido != Sonido::Alla, bitrate, fps).spawn() {
         Ok(h) => h,
         Err(e) => {
             *PRESTANDO.lock().unwrap() = None;
             return red::no(&format!("moonlight: {e}"));
         }
     };
+    let pid = hijo.id();
+    *PRESTANDO.lock().unwrap() = Some((nombre.to_string(), pid));
+    estado::poner(pid, "presta", nombre, "");
     // si Moonlight no aguanta ni dos segundos, no conectó
     thread::sleep(Duration::from_secs(2));
     if let Ok(Some(st)) = hijo.try_wait() {
-        *PRESTANDO.lock().unwrap() = None;
+        soltar(pid);
         return red::no(&format!("moonlight {st}"));
     }
-    // al cerrar Moonlight (aquí o porque allá se apagó), avisar allá
+    // al cerrar Moonlight (aquí o porque allá se apagó), avisar allá; si fue
+    // por una reconexión, allá no le hacen caso
     let nombre = nombre.to_string();
     thread::spawn(move || {
         let _ = hijo.wait();
-        *PRESTANDO.lock().unwrap() = None;
+        if soltar(pid) {
+            println!("machín: {} {nombre}", l("ya no le presto la pantalla a", "no longer lending the screen to"));
+        }
         let _ = red::pedir(&[ip], red::PUERTO, &red::suelta_msg(), Duration::from_secs(5));
-        println!("machín: {} {nombre}", l("ya no le presto la pantalla a", "no longer lending the screen to"));
     });
     red::ok()
+}
+
+/// Ya no se presta con el Moonlight `pid` (si no lo reemplazó otro).
+/// true: era el de ahorita.
+fn soltar(pid: u32) -> bool {
+    let mut p = PRESTANDO.lock().unwrap();
+    if p.as_ref().is_some_and(|(_, x)| *x == pid) {
+        *p = None;
+        estado::quitar_pid(pid, "presta");
+        true
+    } else {
+        false
+    }
 }
 
 fn atender(s: TcpStream) {
@@ -151,9 +188,10 @@ fn atender(s: TcpStream) {
     let msg: Value = serde_json::from_str(linea.trim()).unwrap_or(Value::Null);
     let de = msg["de"].as_str().unwrap_or("").to_string();
     let r = match msg["pide"].as_str() {
-        Some("presta") if !de.is_empty() => presta(&de, peer.ip()),
+        Some("presta") if !de.is_empty() => presta(&msg, &de, peer.ip()),
         Some("suelta") => {
-            if hypr::machin().is_some() {
+            // mientras se reconecta, el Moonlight viejo que se cierra no cuenta
+            if hypr::machin().is_some() && !estado::reconectando() {
                 let _ = crate::apaga();
             }
             red::ok()

@@ -14,6 +14,7 @@ todo regresa a tu pantalla.
 machin                                     el atajo (SUPER+Shift+M en discada): busca la otra
                                            compu, le pide su pantalla y la pone junto a la tuya;
                                            si ya está, la quita
+machin menu                                sonido, lado, calidad y compus de confianza
 machin escucha                             el servicio de cada máquina (al iniciar sesión)
 machin prende [ANCHOxALTO] [--izquierda]   a mano: esta es la principal
 machin apaga                               lo quita; las ventanas regresan
@@ -38,7 +39,16 @@ monitor principal); lo demás se respeta. La regla del monitor se pone en
 caliente y una recarga de la config la borra, así que `prende` deja un
 vigilante (`machin vigila`) que la vuelve a poner y se va cuando MACHIN se va.
 
-Ajustes en `~/.config/machin/machin.conf` (clave=valor): `tam=1920x1200`,
-`lado=derecha|izquierda`, `fps=60`, `bitrate=35000`, `app=Desktop`.
+Ajustes en `~/.config/machin/machin.conf` (clave=valor), también desde
+`machin menu` (en discada: el menú de discada, o clic en el ícono de empalme):
+`sonido=aqui|alla|ambos` (dónde suena: en la principal, en la otra o en las
+dos; de entrada solo en la principal), `lado=derecha|izquierda`,
+`bitrate=35000`, `fps=60`, `tam=1920x1200`, `app=Desktop`. Los decide la
+principal y se los manda a la otra; si cambian con machín prendido, se
+reconecta solo.
+
+Mientras está activo, machín deja en `$XDG_RUNTIME_DIR/machin` un archivo
+`<pid>-principal` o `<pid>-presta` (`<rol> <otra> <tam>`), que lee el módulo
+`machin` de empalme.
 
 MIT.

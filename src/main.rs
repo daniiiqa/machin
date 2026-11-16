@@ -1,69 +1,37 @@
 //! machín: la pantalla de tu otra compu como monitor extra.
 //!
-//!   machin prende [ANCHOxALTO] [--izquierda]  esta es la principal: crea el
-//!                                             monitor MACHIN y lo transmite
-//!   machin apaga                              lo quita; las ventanas regresan
-//!   machin presta HOST                        esta es la pantalla: Moonlight
-//!                                             a pantalla completa contra HOST
-//!   machin estado                             prendido ANCHOxALTO | apagado
+//!   machin              el atajo (SUPER+Shift+M): prende o apaga
+//!   machin menu         el menú (sonido, lado, calidad, confianza)
+//!   machin escucha      el servicio de cada máquina (al iniciar sesión)
+//!   machin prende [ANCHOxALTO] [--izquierda] | apaga | presta HOST | estado
 //!   machin --help | --version
 //!
 //! Cualquier otro argumento es un error y no hace nada.
-//! Ajustes (opcionales) en ~/.config/machin/machin.conf, clave=valor:
-//!   tam=1920x1200  lado=derecha|izquierda  fps=60  bitrate=35000  app=Desktop
 
+mod ajustes;
 mod escucha;
+mod estado;
 mod hypr;
 mod lang;
+mod menu;
 mod red;
 mod sunshine;
 
-use std::time::Duration;
-
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
+use std::time::Duration;
 
+use ajustes::Sonido;
 use lang::l;
 
 pub fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
-struct Ajustes {
-    tam: (i64, i64),
-    izquierda: bool,
-    fps: u32,
-    bitrate: u32,
-    app: String,
-}
-
 pub fn tam(s: &str) -> Option<(i64, i64)> {
     let (w, h) = s.split_once('x')?;
     let (w, h) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
     (w >= 320 && h >= 240 && w <= 7680 && h <= 4320).then_some((w, h))
-}
-
-fn ajustes() -> Ajustes {
-    let mut a = Ajustes { tam: (1920, 1200), izquierda: false, fps: 60, bitrate: 35000, app: "Desktop".into() };
-    let path = home().join(".config/machin/machin.conf");
-    let Ok(txt) = std::fs::read_to_string(&path) else { return a };
-    for line in txt.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        let Some((k, v)) = line.split_once('=') else { continue };
-        let v = v.trim();
-        match k.trim() {
-            "tam" => match tam(v) {
-                Some(t) => a.tam = t,
-                None => eprintln!("machin: machin.conf: tam={v}?"),
-            },
-            "lado" => a.izquierda = v == "izquierda" || v == "left",
-            "fps" => a.fps = v.parse().unwrap_or(a.fps),
-            "bitrate" => a.bitrate = v.parse().unwrap_or(a.bitrate),
-            "app" if !v.is_empty() => a.app = v.to_string(),
-            _ => {}
-        }
-    }
-    a
 }
 
 pub fn avisa(titulo: &str, cuerpo: &str) {
@@ -80,15 +48,17 @@ machín: la pantalla de tu otra compu como monitor extra
   machin                                    el atajo (SUPER+Shift+M): busca la otra
                                             compu, le pide su pantalla y la pone junto
                                             a la tuya; si ya está, la quita
+  machin menu                               sonido, lado, calidad y compus de confianza
   machin escucha                            el servicio de cada máquina (al iniciar
                                             sesión): se anuncia y atiende a la otra
   machin prende [ANCHOxALTO] [--izquierda]  a mano: crea el monitor MACHIN y lo transmite
-  machin apaga                              lo quita; las ventanas regresan
+  machin apaga                              lo quita (o deja de prestar la pantalla)
   machin presta HOST                        a mano: Moonlight a pantalla completa contra HOST
-  machin estado                             prendido ANCHOxALTO | apagado
+  machin estado                             principal OTRA | presta OTRA | prendido WxH | apagado
 
 Ajustes en ~/.config/machin/machin.conf (clave=valor):
-  tam=1920x1200  lado=derecha|izquierda  fps=60  bitrate=35000  app=Desktop
+  sonido=aqui|alla|ambos  lado=derecha|izquierda  bitrate=35000  fps=60
+  tam=1920x1200  app=Desktop
 ";
 
 const AYUDA_EN: &str = "\
@@ -97,21 +67,24 @@ machín: your other computer's screen as an extra monitor
   machin                                      the shortcut (SUPER+Shift+M): finds the other
                                               computer, asks for its screen and puts it next
                                               to yours; if it's already on, removes it
+  machin menu                                 sound, side, quality and trusted computers
   machin escucha                              each machine's service (at login): announces
                                               itself and answers the other one
   machin prende [WIDTHxHEIGHT] [--izquierda]  by hand: creates the MACHIN monitor and streams it
-  machin apaga                                removes it; windows come back
+  machin apaga                                removes it (or stops lending the screen)
   machin presta HOST                          by hand: Moonlight fullscreen against HOST
-  machin estado                               prendido WxH | apagado
+  machin estado                               principal OTHER | presta OTHER | prendido WxH | apagado
 
 Settings in ~/.config/machin/machin.conf (key=value):
-  tam=1920x1200  lado=derecha|izquierda  fps=60  bitrate=35000  app=Desktop
+  sonido=aqui|alla|ambos  lado=derecha|izquierda  bitrate=35000  fps=60
+  tam=1920x1200  app=Desktop
 ";
 
 enum Pedido {
     Ayuda,
     Version,
     Alterna,
+    Menu,
     Escucha,
     Estado,
     Prende { tam: Option<(i64, i64)>, izquierda: bool },
@@ -121,23 +94,24 @@ enum Pedido {
     Vigila,
 }
 
-fn vigila_pid() -> PathBuf {
-    let run = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    run.join("machin/vigila.pid")
+fn vigila_pid_archivo() -> PathBuf {
+    estado::dir().join("vigila.pid")
 }
 
-/// El vigilante ya corre si su pid sigue vivo y es un `machin vigila`.
-fn vigila_vivo() -> bool {
-    let Ok(pid) = std::fs::read_to_string(vigila_pid()) else { return false };
-    std::fs::read(format!("/proc/{}/cmdline", pid.trim()))
+/// El pid del vigilante, si sigue vivo y es un `machin vigila`.
+fn vigila_pid() -> Option<u32> {
+    let pid = std::fs::read_to_string(vigila_pid_archivo()).ok()?.trim().parse::<u32>().ok()?;
+    std::fs::read(format!("/proc/{pid}/cmdline"))
         .is_ok_and(|c| c.split(|b| *b == 0).any(|a| a == b"vigila"))
+        .then_some(pid)
 }
 
 fn lanzar_vigila() {
-    if vigila_vivo() {
+    if vigila_pid().is_some() {
         return;
     }
     let Ok(yo) = std::env::current_exe() else { return };
+    let _ = std::fs::create_dir_all(estado::dir());
     if let Ok(hijo) = Command::new("setsid")
         .arg(yo)
         .arg("vigila")
@@ -147,21 +121,23 @@ fn lanzar_vigila() {
         .spawn()
     {
         // setsid sin -f hace exec: el pid es el del vigilante
-        let _ = std::fs::write(vigila_pid(), hijo.id().to_string());
+        let _ = std::fs::write(vigila_pid_archivo(), hijo.id().to_string());
     }
 }
 
 fn argumentos(args: &[String]) -> Result<Pedido, String> {
     let Some(cmd) = args.first() else { return Ok(Pedido::Alterna) };
     let resto = &args[1..];
+    let raro = |x: &str| format!("{} «{x}»", l("no entiendo", "I don't understand"));
     let sobra = |r: &[String]| match r.first() {
-        Some(x) => Err(format!("{} «{x}»", l("no entiendo", "I don't understand"))),
+        Some(x) => Err(raro(x)),
         None => Ok(()),
     };
     match cmd.as_str() {
         "-h" | "--help" | "help" | "ayuda" => Ok(Pedido::Ayuda),
         "-V" | "--version" | "version" => Ok(Pedido::Version),
         "estado" | "status" => sobra(resto).map(|_| Pedido::Estado),
+        "menu" | "menú" => sobra(resto).map(|_| Pedido::Menu),
         "apaga" | "off" => sobra(resto).map(|_| Pedido::Apaga),
         "vigila" => sobra(resto).map(|_| Pedido::Vigila),
         "escucha" | "listen" => sobra(resto).map(|_| Pedido::Escucha),
@@ -171,7 +147,7 @@ fn argumentos(args: &[String]) -> Result<Pedido, String> {
                 match a.as_str() {
                     "--izquierda" | "--left" => izq = true,
                     x if t.is_none() && tam(x).is_some() => t = tam(x),
-                    x => return Err(format!("{} «{x}»", l("no entiendo", "I don't understand"))),
+                    x => return Err(raro(x)),
                 }
             }
             Ok(Pedido::Prende { tam: t, izquierda: izq })
@@ -179,29 +155,34 @@ fn argumentos(args: &[String]) -> Result<Pedido, String> {
         "presta" | "lend" => match resto {
             [host] if !host.starts_with('-') => Ok(Pedido::Presta(host.clone())),
             [] => Err(l("presta necesita el HOST (la compu principal)", "presta needs the HOST (the main computer)").into()),
-            [_, x, ..] | [x] => Err(format!("{} «{x}»", l("no entiendo", "I don't understand"))),
+            [_, x, ..] | [x] => Err(raro(x)),
         },
-        x => Err(format!("{} «{x}» (machin --help)", l("no entiendo", "I don't understand"))),
+        x => Err(format!("{} (machin --help)", raro(x))),
     }
 }
 
-fn estado() -> ExitCode {
+fn estado_txt() -> String {
+    if let Some(a) = estado::activo("principal") {
+        return format!("principal {}", a.otra);
+    }
+    if let Some(a) = estado::activo("presta") {
+        return format!("presta {}", a.otra);
+    }
     match hypr::machin() {
         Some(m) => {
             let tx = if sunshine::corriendo() { "" } else { l(" · sin sunshine", " · no sunshine") };
-            println!("prendido {}x{}{tx}", m.px_w, m.px_h);
+            format!("prendido {}x{}{tx}", m.px_w, m.px_h)
         }
-        None => println!("apagado"),
+        None => "apagado".into(),
     }
-    ExitCode::SUCCESS
 }
 
-fn prende(t: Option<(i64, i64)>, izquierda: bool) -> Result<(), String> {
-    let a = ajustes();
+pub fn prende(t: Option<(i64, i64)>, izquierda: bool) -> Result<hypr::Monitor, String> {
+    let a = ajustes::leer();
     let (w, h) = t.unwrap_or(a.tam);
     let izquierda = izquierda || a.izquierda;
     let m = hypr::crear(w, h, izquierda)?;
-    sunshine::preparar_conf()?;
+    sunshine::preparar_conf(a.sonido != Sonido::Aqui)?;
     sunshine::parar()?;
     if let Err(e) = sunshine::arrancar() {
         // sin transmisión el monitor no sirve: no dejarlo colgado
@@ -209,49 +190,24 @@ fn prende(t: Option<(i64, i64)>, izquierda: bool) -> Result<(), String> {
         return Err(e);
     }
     lanzar_vigila();
-    let lado = if izquierda { l("a la izquierda", "on the left") } else { l("a la derecha", "on the right") };
-    let msg = format!("{}x{} {lado} · workspace {}", m.px_w, m.px_h, m.workspace);
-    println!("machín: {msg}");
-    avisa(l("machín prendido", "machín on"), &msg);
-    Ok(())
+    Ok(m)
 }
 
-/// El atajo: si está prendido lo apaga; si no, busca la otra compu, crea
-/// MACHIN del tamaño de su pantalla y le pide que se conecte.
-fn alterna() -> Result<(), String> {
-    if hypr::machin().is_some() {
-        // al parar Sunshine, el Moonlight de allá se cierra solo
-        return apaga();
-    }
-    let otras = red::buscar(Duration::from_millis(2500))?;
-    let otra = match otras.len() {
-        0 => {
-            return Err(l(
-                "no veo otra compu con machín en la red (¿tiene `machin escucha`?)",
-                "no other computer with machín on the network (is `machin escucha` running?)",
-            )
-            .into());
-        }
-        1 => otras[0].clone(),
-        _ => elegir(&otras).ok_or(l("no elegiste ninguna", "none chosen"))?,
-    };
-    let (w, h) = otra.tam.unwrap_or(ajustes().tam);
-    println!("machín: {} {} ({w}x{h})…", l("pidiéndole la pantalla a", "asking for the screen of"), otra.nombre);
-    prende(Some((w, h)), false)?;
+/// Pedirle a `otra` (el JSON de estado::otra) que se conecte, con el
+/// sonido y la calidad de aquí.
+fn pedir_presta(otra: &serde_json::Value) -> Result<(), String> {
+    let nombre = otra["nombre"].as_str().unwrap_or("?");
+    let ips: Vec<std::net::IpAddr> = otra["ips"]
+        .as_array()
+        .map(|v| v.iter().filter_map(|i| i.as_str()?.parse().ok()).collect())
+        .unwrap_or_default();
+    let puerto = otra["puerto"].as_u64().unwrap_or(red::PUERTO as u64) as u16;
+    let a = ajustes::leer();
     // la otra puede estar preguntando: hasta 45 s
-    let r = red::pedir(&otra.ips, otra.puerto, &red::presta_msg(), Duration::from_secs(45));
+    let r = red::pedir(&ips, puerto, &red::presta_msg(&a), Duration::from_secs(45));
     match r {
-        Ok(v) if v["ok"].as_bool() == Some(true) => {
-            let msg = if lang::es() {
-                format!("{} es tu monitor de la derecha", otra.nombre)
-            } else {
-                format!("{} is your monitor on the right", otra.nombre)
-            };
-            avisa("machín", &msg);
-            Ok(())
-        }
+        Ok(v) if v["ok"].as_bool() == Some(true) => Ok(()),
         otro => {
-            let _ = apaga();
             let por = match &otro {
                 Ok(v) => match v["por"].as_str().unwrap_or("") {
                     "no" => l("dijo que no", "said no").to_string(),
@@ -265,37 +221,91 @@ fn alterna() -> Result<(), String> {
                 },
                 Err(e) => e.clone(),
             };
-            Err(format!("{}: {por}", otra.nombre))
+            Err(format!("{nombre}: {por}"))
         }
     }
 }
 
-/// Varias compus: que elijas con jale.
-fn elegir(otras: &[red::Otra]) -> Option<red::Otra> {
-    use std::io::Write;
-    let jale = home().join(".local/bin/jale");
-    let mut hijo = Command::new(jale)
-        .args(["-dmenu", "-p", "machín"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .ok()?;
-    {
-        let mut entrada = hijo.stdin.take()?;
-        for o in otras {
-            let _ = writeln!(entrada, "{}", o.nombre);
-        }
+fn marcar_principal(nombre: &str, w: i64, h: i64) {
+    if let Some(pid) = vigila_pid() {
+        estado::poner(pid, "principal", nombre, &format!("{w}x{h}"));
     }
-    let out = hijo.wait_with_output().ok()?;
-    let elegida = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    otras.iter().find(|o| o.nombre == elegida).cloned()
 }
 
-/// Moonlight a pantalla completa contra `host`, con la resolución de este
-/// monitor. Moonlight (SDL) pide que no se apague la pantalla mientras
-/// transmite, y hypridle lo respeta.
-pub fn moonlight(host: &str) -> Command {
-    let a = ajustes();
+/// El atajo: si está prendido lo apaga (también si esta presta su pantalla);
+/// si no, busca la otra compu, crea MACHIN del tamaño de su pantalla y le
+/// pide que se conecte.
+pub fn alterna() -> Result<(), String> {
+    if hypr::machin().is_some() || estado::activo("presta").is_some() {
+        return apaga();
+    }
+    let otras = red::buscar(Duration::from_millis(2500))?;
+    let otra = match otras.len() {
+        0 => {
+            return Err(l(
+                "no veo otra compu con machín en la red (¿tiene `machin escucha`?)",
+                "no other computer with machín on the network (is `machin escucha` running?)",
+            )
+            .into());
+        }
+        1 => otras[0].clone(),
+        _ => menu::elegir_otra(&otras).ok_or(l("no elegiste ninguna", "none chosen"))?,
+    };
+    let (w, h) = otra.tam.unwrap_or(ajustes::leer().tam);
+    println!("machín: {} {} ({w}x{h})…", l("pidiéndole la pantalla a", "asking for the screen of"), otra.nombre);
+    let info = serde_json::json!({
+        "nombre": otra.nombre,
+        "ips": otra.ips.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+        "puerto": otra.puerto,
+        "tam": format!("{w}x{h}"),
+    });
+    estado::guardar_otra(&info);
+    prende(Some((w, h)), false)?;
+    if let Err(e) = pedir_presta(&info) {
+        let _ = apaga();
+        return Err(e);
+    }
+    marcar_principal(&otra.nombre, w, h);
+    let lado = if ajustes::leer().izquierda { l("izquierda", "left") } else { l("derecha", "right") };
+    let msg = if lang::es() {
+        format!("{} es tu monitor de la {lado}", otra.nombre)
+    } else {
+        format!("{} is your monitor on the {lado}", otra.nombre)
+    };
+    avisa("machín", &msg);
+    Ok(())
+}
+
+/// Cambió un ajuste con machín prendido: Sunshine y la otra se reconectan
+/// con lo nuevo sin apagar nada (el «suelta» del Moonlight viejo no cuenta).
+pub fn reconecta() -> Result<(), String> {
+    let Some(otra) = estado::otra() else { return Ok(()) };
+    if estado::activo("principal").is_none() {
+        return Ok(());
+    }
+    let nombre = otra["nombre"].as_str().unwrap_or("?").to_string();
+    let t = otra["tam"].as_str().and_then(tam);
+    estado::marcar_reconexion();
+    let r = prende(t, false).and_then(|m| pedir_presta(&otra).map(|_| m));
+    estado::desmarcar_reconexion();
+    match r {
+        Ok(m) => {
+            marcar_principal(&nombre, m.px_w, m.px_h);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = apaga();
+            Err(e)
+        }
+    }
+}
+
+/// Esta máquina es la pantalla de `host`: Moonlight a pantalla completa con
+/// la resolución de este monitor. Moonlight (SDL) pide que no se apague la
+/// pantalla mientras transmite, y hypridle lo respeta. `audio_en_host`: que
+/// la principal siga sonando.
+pub fn moonlight(host: &str, audio_en_host: bool, bitrate: u32, fps: u32) -> Command {
+    let a = ajustes::leer();
     let res = hypr::monitors()
         .ok()
         .and_then(|m| hypr::ancla(&m))
@@ -303,16 +313,25 @@ pub fn moonlight(host: &str) -> Command {
         .unwrap_or_else(|| format!("{}x{}", a.tam.0, a.tam.1));
     let mut c = Command::new("moonlight");
     c.args(["stream", host, &a.app, "--resolution", &res])
-        .args(["--fps", &a.fps.to_string(), "--bitrate", &a.bitrate.to_string()])
-        .args(["--display-mode", "fullscreen", "--audio-on-host", "--no-quit-after"])
+        .args(["--fps", &fps.to_string(), "--bitrate", &bitrate.to_string()])
+        .args(["--display-mode", "fullscreen", "--no-quit-after"])
+        .arg(if audio_en_host { "--audio-on-host" } else { "--no-audio-on-host" })
         .stdin(Stdio::null());
     c
 }
 
 pub fn apaga() -> Result<(), String> {
+    // esta presta su pantalla: cerrar Moonlight (escucha le avisa a la otra)
+    if let Some(a) = estado::activo("presta") {
+        let _ = Command::new("kill").arg(a.pid.to_string()).status();
+        estado::quitar("presta");
+        println!("machín: {} {}", l("ya no le prestas la pantalla a", "no longer lending the screen to"), a.otra);
+        return Ok(());
+    }
     let habia = hypr::machin().is_some();
     sunshine::parar()?;
     hypr::quitar()?;
+    estado::quitar("principal");
     if habia {
         println!("machín: {}", l("apagado; las ventanas regresaron", "off; windows are back"));
         avisa(l("machín apagado", "machín off"), l("las ventanas regresaron", "windows are back"));
@@ -324,8 +343,9 @@ pub fn apaga() -> Result<(), String> {
 
 /// A mano: esta máquina es la pantalla de `host`.
 fn presta(host: &str) -> Result<(), String> {
+    let a = ajustes::leer();
     println!("machín: {} {host}", l("prestando la pantalla a", "lending the screen to"));
-    let st = moonlight(host)
+    let st = moonlight(host, a.sonido != Sonido::Alla, a.bitrate, a.fps)
         .status()
         .map_err(|e| format!("moonlight: {e} (¿está instalado? pacman -S moonlight-qt)"))?;
     if st.success() { Ok(()) } else { Err(format!("moonlight {st}")) }
@@ -349,15 +369,29 @@ fn main() -> ExitCode {
             println!("machin {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         }
-        Pedido::Estado => return estado(),
+        Pedido::Estado => {
+            println!("{}", estado_txt());
+            return ExitCode::SUCCESS;
+        }
         Pedido::Alterna => alterna(),
+        Pedido::Menu => menu::menu(),
         Pedido::Escucha => escucha::escuchar(),
-        Pedido::Prende { tam, izquierda } => prende(tam, izquierda),
+        Pedido::Prende { tam, izquierda } => prende(tam, izquierda).map(|m| {
+            let lado = if izquierda || ajustes::leer().izquierda {
+                l("a la izquierda", "on the left")
+            } else {
+                l("a la derecha", "on the right")
+            };
+            let msg = format!("{}x{} {lado} · workspace {}", m.px_w, m.px_h, m.workspace);
+            println!("machín: {msg}");
+            avisa(l("machín prendido", "machín on"), &msg);
+        }),
         Pedido::Apaga => apaga(),
         Pedido::Presta(h) => presta(&h),
         Pedido::Vigila => {
             let r = hypr::vigilar();
-            let _ = std::fs::remove_file(vigila_pid());
+            let _ = std::fs::remove_file(vigila_pid_archivo());
+            estado::quitar("principal");
             if let Err(e) = r {
                 eprintln!("machin vigila: {e}");
                 return ExitCode::FAILURE;
@@ -372,5 +406,55 @@ fn main() -> ExitCode {
             avisa("machín", &e);
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Un HOME de mentira: los tests no tocan tu ~/.config.
+    fn home_falso(nombre: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("machin-test-{nombre}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // SAFETY: un solo test por proceso de cargo toca HOME (ver `todo`)
+        unsafe { std::env::set_var("HOME", &d) };
+        d
+    }
+
+    #[test]
+    fn todo() {
+        let h = home_falso("todo");
+        // ajustes: de entrada el sonido va solo en la principal
+        assert_eq!(ajustes::leer().sonido, Sonido::Aqui);
+        ajustes::poner("sonido", "alla").unwrap();
+        ajustes::poner("bitrate", "60000").unwrap();
+        ajustes::poner("sonido", "ambos").unwrap();
+        let a = ajustes::leer();
+        assert_eq!(a.sonido, Sonido::Ambos);
+        assert_eq!(a.bitrate, 60000);
+        let txt = std::fs::read_to_string(h.join(".config/machin/machin.conf")).unwrap();
+        assert_eq!(txt.matches("sonido=").count(), 1, "{txt}");
+
+        // sunshine.conf: lo tuyo se respeta, lo de machín se pone una vez
+        let sc = h.join(".config/sunshine/sunshine.conf");
+        std::fs::create_dir_all(sc.parent().unwrap()).unwrap();
+        std::fs::write(&sc, "encoder = vaapi\noutput_name = 1\nstream_audio = enabled\n").unwrap();
+        sunshine::preparar_conf(false).unwrap();
+        let t = std::fs::read_to_string(&sc).unwrap();
+        assert!(t.contains("encoder = vaapi"));
+        assert!(t.contains("output_name = MACHIN") && !t.contains("output_name = 1"));
+        assert!(t.contains("stream_audio = disabled"));
+        assert!(t.contains("capture = wlr"));
+        sunshine::preparar_conf(true).unwrap();
+        let t = std::fs::read_to_string(&sc).unwrap();
+        assert_eq!(t.matches("stream_audio").count(), 1);
+        assert!(t.contains("stream_audio = enabled"));
+
+        // argumentos raros: error, nada
+        assert!(argumentos(&["menu".into(), "x".into()]).is_err());
+        assert!(argumentos(&["--rarito".into()]).is_err());
+        let _ = std::fs::remove_dir_all(&h);
     }
 }

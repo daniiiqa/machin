@@ -19,13 +19,18 @@ pub fn log() -> PathBuf {
     crate::home().join(".local/state/machin/sunshine.log")
 }
 
-/// Deja en sunshine.conf `capture = wlr` y `output_name = MACHIN`; lo demás
-/// (encoder, adapter_name, lo que pongas en su panel web) se respeta.
-pub fn preparar_conf() -> Result<(), String> {
+/// Deja en sunshine.conf `capture = wlr`, `output_name = MACHIN` y
+/// `stream_audio` (si el sonido va a la otra compu o no); lo demás (encoder,
+/// adapter_name, lo que pongas en su panel web) se respeta.
+pub fn preparar_conf(audio: bool) -> Result<(), String> {
     let path = conf();
     let viejo = fs::read_to_string(&path).unwrap_or_default();
-    let quiero = [("capture", "wlr"), ("output_name", SALIDA)];
-    let mut vistos = [false; 2];
+    let quiero = [
+        ("capture", "wlr"),
+        ("output_name", SALIDA),
+        ("stream_audio", if audio { "enabled" } else { "disabled" }),
+    ];
+    let mut vistos = [false; 3];
     let mut lineas: Vec<String> = Vec::new();
     for line in viejo.lines() {
         let clave = line.split('=').next().unwrap_or("").trim();
