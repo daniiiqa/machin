@@ -60,25 +60,49 @@ pub fn preparar_conf(audio: bool) -> Result<(), String> {
     fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Los Sunshine vivos de verdad: un zombi (ya muerto, que su padre no ha
+/// recogido) no cuenta. `pgrep` sí los cuenta, y por eso un Sunshine que
+/// arrancó el menú y luego se mató «no se quería ir».
+fn pids() -> Vec<u32> {
+    let Ok(es) = fs::read_dir("/proc") else { return Vec::new() };
+    es.flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            // /proc/<pid>/stat: «pid (comm) estado …»
+            let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+            let Some((izq, der)) = stat.rsplit_once(')') else { return false };
+            izq.ends_with("(sunshine") && der.trim_start().chars().next().is_some_and(|c| c != 'Z')
+        })
+        .collect()
+}
+
 pub fn corriendo() -> bool {
-    Command::new("pgrep")
-        .args(["-x", "sunshine"])
-        .stdout(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    !pids().is_empty()
+}
+
+fn senal(s: &str) {
+    for pid in pids() {
+        let _ = Command::new("kill").args([s, &pid.to_string()]).stderr(Stdio::null()).status();
+    }
 }
 
 pub fn parar() -> Result<(), String> {
     if !corriendo() {
         return Ok(());
     }
-    let _ = Command::new("pkill").args(["-x", "sunshine"]).status();
-    let hasta = Instant::now() + Duration::from_secs(5);
+    senal("-TERM");
+    // con una transmisión abierta Sunshine tarda en cerrar; luego, a la mala
+    // (soltar la GPU también toma su rato)
+    let term = Instant::now() + Duration::from_secs(5);
+    let kill = term + Duration::from_secs(3);
+    let mut matado = false;
     while corriendo() {
-        if Instant::now() > hasta {
-            let _ = Command::new("pkill").args(["-KILL", "-x", "sunshine"]).status();
-            sleep(Duration::from_millis(300));
-            return if corriendo() { Err("sunshine no se quiso ir".into()) } else { Ok(()) };
+        if Instant::now() > kill {
+            return Err("sunshine no se quiso ir".into());
+        }
+        if !matado && Instant::now() > term {
+            senal("-KILL");
+            matado = true;
         }
         sleep(Duration::from_millis(100));
     }
@@ -94,12 +118,14 @@ pub fn arrancar() -> Result<(), String> {
     }
     let out = File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
     let err = out.try_clone().map_err(|e| e.to_string())?;
+    // setsid -f: Sunshine no queda como hijo de este proceso (el menú vive un
+    // rato y no lo recogería al morir: quedaba zombi); setsid sale luego luego
     Command::new("setsid")
-        .arg("sunshine")
+        .args(["-f", "sunshine"])
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err)
-        .spawn()
+        .status()
         .map_err(|e| format!("sunshine: {e} (¿está instalado? yay -S sunshine-bin)"))?;
     let marca = format!("is {SALIDA}:");
     let inicio = Instant::now();

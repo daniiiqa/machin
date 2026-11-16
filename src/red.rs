@@ -87,6 +87,11 @@ pub fn buscar(espera: Duration) -> Result<Vec<Otra>, String> {
         }
         let tam = info.get_property_val_str("tam").and_then(crate::tam);
         let mut ips: Vec<IpAddr> = info.get_addresses_v4().into_iter().map(IpAddr::V4).collect();
+        // todavía sin dirección (acaba de arrancar): esperar a que la anuncie,
+        // si no, se pedía «sin IPs»
+        if ips.is_empty() {
+            continue;
+        }
         // las de docker (172.16/12) al último
         ips.sort_by_key(|ip| matches!(ip, IpAddr::V4(v) if v.octets()[0] == 172 && (16..32).contains(&v.octets()[1])));
         otras.push(Otra { nombre, tam, ips, puerto: info.get_port() });

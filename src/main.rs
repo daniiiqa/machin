@@ -112,16 +112,19 @@ fn lanzar_vigila() {
     }
     let Ok(yo) = std::env::current_exe() else { return };
     let _ = std::fs::create_dir_all(estado::dir());
-    if let Ok(hijo) = Command::new("setsid")
+    // setsid -f: que no sea hijo de este proceso (si no, al morir queda
+    // zombi hasta que este termine). Él anota su pid al arrancar.
+    let _ = Command::new("setsid")
+        .arg("-f")
         .arg(yo)
         .arg("vigila")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
-    {
-        // setsid sin -f hace exec: el pid es el del vigilante
-        let _ = std::fs::write(vigila_pid_archivo(), hijo.id().to_string());
+        .status();
+    let hasta = std::time::Instant::now() + Duration::from_secs(2);
+    while vigila_pid().is_none() && std::time::Instant::now() < hasta {
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -329,9 +332,12 @@ pub fn apaga() -> Result<(), String> {
         return Ok(());
     }
     let habia = hypr::machin().is_some();
-    sunshine::parar()?;
+    // aunque Sunshine tarde en irse, el monitor se quita: que las ventanas
+    // regresen pase lo que pase
+    let parado = sunshine::parar();
     hypr::quitar()?;
     estado::quitar("principal");
+    parado?;
     if habia {
         println!("machín: {}", l("apagado; las ventanas regresaron", "off; windows are back"));
         avisa(l("machín apagado", "machín off"), l("las ventanas regresaron", "windows are back"));
@@ -389,6 +395,8 @@ fn main() -> ExitCode {
         Pedido::Apaga => apaga(),
         Pedido::Presta(h) => presta(&h),
         Pedido::Vigila => {
+            let _ = std::fs::create_dir_all(estado::dir());
+            let _ = std::fs::write(vigila_pid_archivo(), std::process::id().to_string());
             let r = hypr::vigilar();
             let _ = std::fs::remove_file(vigila_pid_archivo());
             estado::quitar("principal");
