@@ -11,11 +11,22 @@ mouse cruza solo, le tocan workspaces y las ventanas van y vienen. Al apagarlo
 todo regresa a tu pantalla.
 
 ```
-machin prende [ANCHOxALTO] [--izquierda]   esta es la principal (de entrada 1920x1200, a la derecha)
+machin                                     el atajo (SUPER+Shift+M en discada): busca la otra
+                                           compu, le pide su pantalla y la pone junto a la tuya;
+                                           si ya está, la quita
+machin escucha                             el servicio de cada máquina (al iniciar sesión)
+machin prende [ANCHOxALTO] [--izquierda]   a mano: esta es la principal
 machin apaga                               lo quita; las ventanas regresan
-machin presta HOST                         esta es la pantalla: Moonlight contra HOST
+machin presta HOST                         a mano: esta es la pantalla, Moonlight contra HOST
 machin estado                              prendido ANCHOxALTO | apagado
 ```
+
+Cada máquina corre `machin escucha`: se anuncia en la red (mDNS
+`_machin._tcp`, con su nombre y el tamaño de su pantalla) y atiende en el
+puerto 47392. Al apretar el atajo, la otra pregunta *Aceptar / Siempre / No*
+(con *Siempre* ya no vuelve a preguntar; la lista está en
+`~/.config/machin/confianza`). Solo acepta compus emparejadas en su Moonlight,
+y Moonlight fija su certificado. Al cerrar Moonlight allá, se apaga aquí.
 
 Necesita `sunshine-bin` (AUR) y `moonlight-qt` en las dos máquinas, emparejadas
 una vez: el panel de Sunshine en https://localhost:47990 y el PIN que da
