@@ -1,0 +1,13 @@
+[package]
+name = "machin"
+version = "0.1.0"
+edition = "2024"
+description = "machín: la pantalla de tu otra compu como monitor extra (Hyprland + Sunshine/Moonlight)"
+license = "MIT"
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+lto = true
+strip = true
