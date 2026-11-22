@@ -5,12 +5,13 @@
 //!           llamarse igual no pasa). De confianza entra directo; si no, se
 //!           pregunta (Aceptar / Siempre / No), como picha.
 //!   suelta  la otra cerró Moonlight: aquí se apaga machín.
+//!   hola    ¿sigues ahí? (cuando mDNS falla): se contesta con la pantalla.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -22,6 +23,8 @@ use crate::{estado, hypr, red};
 
 /// a quién le estoy prestando la pantalla ahorita, y el pid de su Moonlight
 static PRESTANDO: Mutex<Option<(String, u32)>> = Mutex::new(None);
+/// el tamaño de la pantalla que se anuncia, para contestar «hola»
+static TAM: OnceLock<String> = OnceLock::new();
 
 fn confianza() -> PathBuf {
     crate::home().join(".config/machin/confianza")
@@ -196,6 +199,7 @@ fn atender(s: TcpStream) {
             }
             red::ok()
         }
+        Some("hola") => red::hola(TAM.get().map(String::as_str).unwrap_or("")),
         _ => red::no("no entiendo"),
     };
     let mut s = s;
@@ -214,6 +218,7 @@ pub fn escuchar() -> Result<(), String> {
     let mons = hypr::monitors()?;
     let m = hypr::ancla(&mons).ok_or("no encontré ningún monitor")?;
     let tam = format!("{}x{}", m.px_w, m.px_h);
+    let _ = TAM.set(tam.clone());
     let _anuncio = red::anunciar(&tam)?;
     println!("machín: {} {} ({tam})", l("escuchando como", "listening as"), red::yo());
     for s in l_.incoming().flatten() {

@@ -5,6 +5,8 @@
 //!   {"pide":"presta","de":"senjougahara","sonido":"aqui","bitrate":35000,"fps":60}
 //!                                           ¿me prestas tu pantalla?
 //!   {"pide":"suelta","de":"hachikuji"}      ya cerré Moonlight: apágalo
+//!   {"pide":"hola","de":"senjougahara"}     ¿sigues ahí? (cuando mDNS no la
+//!                                           encuentra) → {"ok":true,"de":…,"tam":"WxH"}
 //!   → {"ok":true} | {"ok":false,"por":"no|sin-pareja|ocupada|…"}
 
 use std::io::{BufRead, BufReader, Write};
@@ -31,11 +33,27 @@ pub struct Anuncio {
     fullname: String,
 }
 
-pub fn anunciar(tam: &str) -> Result<Anuncio, String> {
+/// Interfaces que no son la LAN: docker y compañía. Si se dejan, se anuncian
+/// sus IPs (172.x) y se pregunta también por ahí.
+fn de_mas() -> Vec<IfKind> {
+    let Ok(dir) = std::fs::read_dir("/sys/class/net") else { return Vec::new() };
+    dir.flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| ["docker", "br-", "veth", "virbr", "vnet"].iter().any(|p| n.starts_with(p)))
+        .map(IfKind::Name)
+        .collect()
+}
+
+fn daemon() -> Result<ServiceDaemon, String> {
     let daemon = ServiceDaemon::new().map_err(|e| format!("mDNS: {e}"))?;
-    daemon
-        .disable_interface(vec![IfKind::LoopbackV4, IfKind::LoopbackV6])
-        .map_err(|e| format!("mDNS: {e}"))?;
+    let mut fuera = vec![IfKind::LoopbackV4, IfKind::LoopbackV6];
+    fuera.extend(de_mas());
+    daemon.disable_interface(fuera).map_err(|e| format!("mDNS: {e}"))?;
+    Ok(daemon)
+}
+
+pub fn anunciar(tam: &str) -> Result<Anuncio, String> {
+    let daemon = daemon()?;
     let nombre = yo();
     let info = ServiceInfo::new(
         SERVICIO,
@@ -68,14 +86,34 @@ pub struct Otra {
     pub puerto: u16,
 }
 
-/// Las otras compus con machín que contestan en `espera`.
+/// Las otras compus con machín que contestan antes de `espera`. Se vuelve a
+/// preguntar cada segundo (el módem pierde multicast entre el cable y el
+/// Wi-Fi) y se sale poco después de la primera respuesta.
 pub fn buscar(espera: Duration) -> Result<Vec<Otra>, String> {
-    let mdns = ServiceDaemon::new().map_err(|e| format!("mDNS: {e}"))?;
-    let eventos = mdns.browse(SERVICIO).map_err(|e| format!("mDNS: {e}"))?;
-    let hasta = Instant::now() + espera;
+    let mdns = daemon()?;
+    let mut eventos = mdns.browse(SERVICIO).map_err(|e| format!("mDNS: {e}"))?;
+    let inicio = Instant::now();
+    let mut hasta = inicio + espera;
+    let mut otra_vez = inicio + Duration::from_secs(1);
     let yo = yo();
     let mut otras: Vec<Otra> = Vec::new();
-    while let Ok(ev) = eventos.recv_timeout(hasta.saturating_duration_since(Instant::now())) {
+    loop {
+        let ahora = Instant::now();
+        if ahora >= hasta {
+            break;
+        }
+        if otras.is_empty() && ahora >= otra_vez {
+            // browse de nuevo = otra pregunta ya (y lo ya resuelto sale del caché)
+            if let Ok(ev) = mdns.browse(SERVICIO) {
+                eventos = ev;
+            }
+            otra_vez = ahora + Duration::from_secs(1);
+        }
+        let ev = match eventos.recv_timeout(hasta.min(otra_vez).saturating_duration_since(ahora)) {
+            Ok(ev) => ev,
+            Err(mdns_sd::RecvTimeoutError::Timeout) => continue,
+            Err(_) => break,
+        };
         let ServiceEvent::ServiceResolved(info) = ev else { continue };
         let nombre = info
             .get_fullname()
@@ -95,9 +133,63 @@ pub fn buscar(espera: Duration) -> Result<Vec<Otra>, String> {
         // las de docker (172.16/12) al último
         ips.sort_by_key(|ip| matches!(ip, IpAddr::V4(v) if v.octets()[0] == 172 && (16..32).contains(&v.octets()[1])));
         otras.push(Otra { nombre, tam, ips, puerto: info.get_port() });
+        // ya hay una: un ratito más por si hay otra, no los segundos completos
+        hasta = hasta.min(Instant::now() + Duration::from_millis(400));
     }
     let _ = mdns.shutdown();
     Ok(otras)
+}
+
+fn ultima_path() -> std::path::PathBuf {
+    crate::home().join(".config/machin/ultima")
+}
+
+/// La última compu con la que se conectó, para cuando mDNS no la encuentra.
+pub fn guardar_ultima(o: &Otra) {
+    let (w, h) = o.tam.unwrap_or((0, 0));
+    let v = json!({
+        "nombre": o.nombre,
+        "ips": o.ips.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+        "puerto": o.puerto,
+        "tam": format!("{w}x{h}"),
+    });
+    let p = ultima_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(p, format!("{v}\n"));
+}
+
+pub fn ultima() -> Option<Otra> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(ultima_path()).ok()?).ok()?;
+    let ips: Vec<IpAddr> = v["ips"].as_array()?.iter().filter_map(|i| i.as_str()?.parse().ok()).collect();
+    if ips.is_empty() {
+        return None;
+    }
+    Some(Otra {
+        nombre: v["nombre"].as_str()?.to_string(),
+        tam: v["tam"].as_str().and_then(crate::tam),
+        ips,
+        puerto: v["puerto"].as_u64().map(|p| p as u16).unwrap_or(PUERTO),
+    })
+}
+
+/// Sin mDNS: ¿la última sigue escuchando? Contesta con su pantalla (una
+/// 0.3.1 contesta «no entiendo», que también dice que está ahí).
+pub fn directo(o: &Otra) -> Option<Otra> {
+    let v = pedir(&o.ips, o.puerto, &json!({ "pide": "hola", "de": yo() }), Duration::from_secs(2)).ok()?;
+    let mut o = o.clone();
+    if let Some(t) = v["tam"].as_str().and_then(crate::tam) {
+        o.tam = Some(t);
+    }
+    if let Some(n) = v["de"].as_str() {
+        o.nombre = n.to_string();
+    }
+    Some(o)
+}
+
+pub fn hola(tam: &str) -> Value {
+    json!({ "ok": true, "de": yo(), "tam": tam })
 }
 
 /// Manda `msg` a la primera IP que conteste y espera la respuesta hasta

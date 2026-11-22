@@ -20,6 +20,7 @@ machin prende [ANCHOxALTO] [--izquierda]   a mano: esta es la principal
 machin apaga                               lo quita; las ventanas regresan
 machin presta HOST                         a mano: esta es la pantalla, Moonlight contra HOST
 machin estado                              prendido ANCHOxALTO | apagado
+machin busca                               qué compus ve en la red (y si la última contesta)
 ```
 
 Cada máquina corre `machin escucha`: se anuncia en la red (mDNS
@@ -28,6 +29,11 @@ puerto 47392. Al apretar el atajo, la otra pregunta *Aceptar / Siempre / No*
 (con *Siempre* ya no vuelve a preguntar; la lista está en
 `~/.config/machin/confianza`). Solo acepta compus emparejadas en su Moonlight,
 y Moonlight fija su certificado. Al cerrar Moonlight allá, se apaga aquí.
+
+Algunos módems pierden el multicast entre el cable y el Wi-Fi, y entonces mDNS
+no encuentra a la otra. Por eso machín guarda la última compu con la que se
+conectó (`~/.config/machin/ultima`) y, mientras busca, le pregunta directo por
+TCP (`{"pide":"hola"}`).
 
 Necesita `sunshine-bin` (AUR) y `moonlight-qt` en las dos máquinas, emparejadas
 una vez: el panel de Sunshine en https://localhost:47990 y el PIN que da

@@ -1,6 +1,6 @@
 [package]
 name = "machin"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "machín: la pantalla de tu otra compu como monitor extra (Hyprland + Sunshine/Moonlight)"
 license = "MIT"

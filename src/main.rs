@@ -55,6 +55,7 @@ machín: la pantalla de tu otra compu como monitor extra
   machin apaga                              lo quita (o deja de prestar la pantalla)
   machin presta HOST                        a mano: Moonlight a pantalla completa contra HOST
   machin estado                             principal OTRA | presta OTRA | prendido WxH | apagado
+  machin busca                              qué compus con machín ve en la red (y la última)
 
 Ajustes en ~/.config/machin/machin.conf (clave=valor):
   sonido=aqui|alla|ambos  lado=derecha|izquierda  bitrate=35000  fps=60
@@ -74,6 +75,7 @@ machín: your other computer's screen as an extra monitor
   machin apaga                                removes it (or stops lending the screen)
   machin presta HOST                          by hand: Moonlight fullscreen against HOST
   machin estado                               principal OTHER | presta OTHER | prendido WxH | apagado
+  machin busca                                which machín computers it sees (and the last one)
 
 Settings in ~/.config/machin/machin.conf (key=value):
   sonido=aqui|alla|ambos  lado=derecha|izquierda  bitrate=35000  fps=60
@@ -87,6 +89,7 @@ enum Pedido {
     Menu,
     Escucha,
     Estado,
+    Busca,
     Prende { tam: Option<(i64, i64)>, izquierda: bool },
     Apaga,
     Presta(String),
@@ -140,6 +143,7 @@ fn argumentos(args: &[String]) -> Result<Pedido, String> {
         "-h" | "--help" | "help" | "ayuda" => Ok(Pedido::Ayuda),
         "-V" | "--version" | "version" => Ok(Pedido::Version),
         "estado" | "status" => sobra(resto).map(|_| Pedido::Estado),
+        "busca" | "find" => sobra(resto).map(|_| Pedido::Busca),
         "menu" | "menú" => sobra(resto).map(|_| Pedido::Menu),
         "apaga" | "off" => sobra(resto).map(|_| Pedido::Apaga),
         "vigila" => sobra(resto).map(|_| Pedido::Vigila),
@@ -242,7 +246,16 @@ pub fn alterna() -> Result<(), String> {
     if hypr::machin().is_some() || estado::activo("presta").is_some() {
         return apaga();
     }
-    let otras = red::buscar(Duration::from_millis(2500))?;
+    // el módem pierde seguido el multicast entre cable y Wi-Fi: mientras se
+    // busca por mDNS, se prueba directo con la última compu
+    let directo = std::thread::spawn(|| red::ultima().as_ref().and_then(red::directo));
+    let mut otras = red::buscar(Duration::from_millis(1500))?;
+    if otras.is_empty() {
+        match directo.join().ok().flatten() {
+            Some(o) => otras.push(o),
+            None => otras = red::buscar(Duration::from_millis(2500))?,
+        }
+    }
     let otra = match otras.len() {
         0 => {
             return Err(l(
@@ -269,6 +282,7 @@ pub fn alterna() -> Result<(), String> {
         return Err(e);
     }
     marcar_principal(&otra.nombre, w, h);
+    red::guardar_ultima(&red::Otra { tam: Some((w, h)), ..otra.clone() });
     let lado = if ajustes::leer().izquierda { l("izquierda", "left") } else { l("derecha", "right") };
     let msg = if lang::es() {
         format!("{} es tu monitor de la {lado}", otra.nombre)
@@ -276,6 +290,32 @@ pub fn alterna() -> Result<(), String> {
         format!("{} is your monitor on the {lado}", otra.nombre)
     };
     avisa("machín", &msg);
+    Ok(())
+}
+
+/// Para revisar la red: lo que contesta por mDNS y si la última contesta directo.
+fn busca() -> Result<(), String> {
+    let t0 = std::time::Instant::now();
+    let otras = red::buscar(Duration::from_secs(4))?;
+    let ms = t0.elapsed().as_millis();
+    let fmt = |o: &red::Otra| {
+        let ips: Vec<String> = o.ips.iter().map(|i| i.to_string()).collect();
+        let tam = o.tam.map(|(w, h)| format!("{w}x{h}")).unwrap_or("?".into());
+        format!("{} {tam} {}:{}", o.nombre, ips.join(","), o.puerto)
+    };
+    if otras.is_empty() {
+        println!("mDNS ({ms} ms): {}", l("nadie", "nobody"));
+    }
+    for o in &otras {
+        println!("mDNS ({ms} ms): {}", fmt(o));
+    }
+    match red::ultima() {
+        None => println!("{}: {}", l("última", "last"), l("ninguna guardada", "none saved")),
+        Some(u) => match red::directo(&u) {
+            Some(o) => println!("{}: {} ({})", l("última", "last"), fmt(&o), l("contesta", "answers")),
+            None => println!("{}: {} ({})", l("última", "last"), fmt(&u), l("no contesta", "no answer")),
+        },
+    }
     Ok(())
 }
 
@@ -379,6 +419,7 @@ fn main() -> ExitCode {
             println!("{}", estado_txt());
             return ExitCode::SUCCESS;
         }
+        Pedido::Busca => busca(),
         Pedido::Alterna => alterna(),
         Pedido::Menu => menu::menu(),
         Pedido::Escucha => escucha::escuchar(),
