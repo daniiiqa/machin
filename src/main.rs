@@ -276,8 +276,12 @@ pub fn alterna() -> Result<(), String> {
         "tam": format!("{w}x{h}"),
     });
     estado::guardar_otra(&info);
-    prende(Some((w, h)), false)?;
-    if let Err(e) = pedir_presta(&info) {
+    // si allá seguía abierto un Moonlight de antes, al reemplazarlo manda
+    // «suelta» (hasta la 0.3.1): que no apague lo que se está prendiendo
+    estado::marcar_reconexion();
+    let r = prende(Some((w, h)), false).and_then(|_| pedir_presta(&info));
+    estado::desmarcar_reconexion();
+    if let Err(e) = r {
         let _ = apaga();
         return Err(e);
     }
@@ -376,7 +380,20 @@ pub fn apaga() -> Result<(), String> {
     // regresen pase lo que pase
     let parado = sunshine::parar();
     hypr::quitar()?;
+    let principal = estado::activo("principal").is_some();
     estado::quitar("principal");
+    // que allá cierren Moonlight (con --no-quit-after se quedaba abierto); ya
+    // sin MACHIN, el «suelta» que regresa no hace nada
+    if habia && principal && !estado::reconectando() {
+        if let Some(otra) = estado::otra() {
+            let ips: Vec<std::net::IpAddr> = otra["ips"]
+                .as_array()
+                .map(|v| v.iter().filter_map(|i| i.as_str()?.parse().ok()).collect())
+                .unwrap_or_default();
+            let puerto = otra["puerto"].as_u64().unwrap_or(red::PUERTO as u64) as u16;
+            let _ = red::pedir(&ips, puerto, &red::suelta_msg(), Duration::from_secs(2));
+        }
+    }
     parado?;
     if habia {
         println!("machín: {}", l("apagado; las ventanas regresaron", "off; windows are back"));

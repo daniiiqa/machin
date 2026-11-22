@@ -112,7 +112,12 @@ fn presta(msg: &Value, nombre: &str, ip: IpAddr) -> Value {
         let mut p = PRESTANDO.lock().unwrap();
         match p.as_ref() {
             Some((n, pid)) if n == nombre => {
-                let _ = Command::new("kill").arg(pid.to_string()).status();
+                // pid 0 antes de matarlo: su vigilante ya no es «el de
+                // ahorita» y no manda «suelta» (allá apagaba lo nuevo)
+                let viejo = *pid;
+                *p = Some((nombre.to_string(), 0));
+                let _ = Command::new("kill").arg(viejo.to_string()).status();
+                estado::quitar_pid(viejo, "presta");
                 true
             }
             Some(_) => return red::no("ocupada"),
@@ -160,9 +165,11 @@ fn presta(msg: &Value, nombre: &str, ip: IpAddr) -> Value {
     let nombre = nombre.to_string();
     thread::spawn(move || {
         let _ = hijo.wait();
-        if soltar(pid) {
-            println!("machín: {} {nombre}", l("ya no le presto la pantalla a", "no longer lending the screen to"));
+        // reemplazado por una reconexión: allá no hay nada que apagar
+        if !soltar(pid) {
+            return;
         }
+        println!("machín: {} {nombre}", l("ya no le presto la pantalla a", "no longer lending the screen to"));
         let _ = red::pedir(&[ip], red::PUERTO, &red::suelta_msg(), Duration::from_secs(5));
     });
     red::ok()
@@ -193,8 +200,13 @@ fn atender(s: TcpStream) {
     let r = match msg["pide"].as_str() {
         Some("presta") if !de.is_empty() => presta(&msg, &de, peer.ip()),
         Some("suelta") => {
+            // la principal se apagó: cerrar el Moonlight que le presta la pantalla
+            let pid = PRESTANDO.lock().unwrap().as_ref().filter(|(n, p)| *n == de && *p != 0).map(|(_, p)| *p);
+            if let Some(pid) = pid {
+                let _ = Command::new("kill").arg(pid.to_string()).status();
+            }
             // mientras se reconecta, el Moonlight viejo que se cierra no cuenta
-            if hypr::machin().is_some() && !estado::reconectando() {
+            else if hypr::machin().is_some() && !estado::reconectando() {
                 let _ = crate::apaga();
             }
             red::ok()
